@@ -1,13 +1,13 @@
 import atexit
 from time import time
 
-from demos.thingyaudio import RecordingDelegate1, RecordingDelegate2, RecordingDelegate3, RecordingDelegate4, RecordingDelegate5
+from demos.thingyaudio import RecordingDelegate1, RecordingDelegate2, RecordingDelegate3, RecordingDelegate4, RecordingDelegate5, RecordingDelegate6
 from thingy52.thingy52 import Thingy52
 
 # use your thingy's MAC address printed on the device.
 THINGY_ADDRESS = "EF:D5:24:2C:FE:73"
-RECORD_DURATION_SECONDS = 10
-RECORDING_DELEGATE = RecordingDelegate1
+RECORD_DURATION_SECONDS = 5
+RECORDING_DELEGATE = RecordingDelegate6
 
 t = Thingy52(THINGY_ADDRESS)
 # Set mic mode to ADPCM
@@ -18,6 +18,7 @@ rec = RECORDING_DELEGATE(t.handles)
 t.setDelegate(rec)
 atexit.register(rec.finish)
 t.sound.toggle_notifications(characteristic="microphone", enable=True)
+t.setMTU(276)   # maximum received from thingy = 131 bytes
 
 # Record for specified duration. Audio file is written
 now = time()

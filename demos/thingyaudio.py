@@ -289,6 +289,47 @@ class RecordingDelegate5(DefaultDelegate):
 
         self.wavfile.close()
 
+# use modified adpcm_decode func
+class RecordingDelegate6(DefaultDelegate):
+    def __init__(self, handles, audio_filename='RecordingDelegate6.wav'):
+        DefaultDelegate.__init__(self)
+        self.handles = handles
+        self.p = pyaudio.PyAudio()
+        self.wavfile = wave.open(audio_filename, 'wb')
+        self.wavfile.setnchannels(CHANNELS)
+        self.wavfile.setsampwidth(self.p.get_sample_size(FORMAT))
+        # maybe framerate should be:
+        # 16000 samples/second
+        # or
+        # 40 samples/frame * 60 frames/second = 2400 samples/second
+        # self.wavfile.setframerate(2400)
+        self.wavfile.setframerate(RATE)
+        # this gets us close. Todo: try offsetting the bytes with -128
+        # self.wavfile.setframerate(int(RATE/4))
+        self.numframes = 0
+        self.frames = []
+        print("* recording")
+        self.state = None
+
+    def handleNotification(self, cHandle, data):
+        #pcm = adpcm_decode(data)
+        pcm = adpcm_frame_decode(data)
+        self.frames.append(pcm)
+        self.numframes += 1
+
+    def finish(self):
+        print("* done recording", self.numframes, "frames")
+        # FIXME: 2bytes per sample? 1 channel, 2 bytes per sample -> each frame is 2 bytes
+        # a byte containing a 4-bit ADPCM sample -> a 16-bit PCM sample
+        # 131 * 4 = 524 bytes (pcm) per packet = 262 frames per package
+        self.wavfile.setnframes(self.numframes*262)
+
+        # Todo: Try Wave_write.writeframesraw(data) - "Write audio frames, without correcting nframes".
+        [self.wavfile.writeframes(frame) for frame in self.frames]
+
+        self.wavfile.close()
+
+
 
 # This is just used to test recording of laptop microphone
 def record_laptop_microphone():
@@ -427,3 +468,68 @@ def adpcm_decode(adpcm):
         _out += 2
 
     return pcm
+
+# In this func, the input size of "code" should be 1 byte
+def adpcm_decode2(code):
+    index = 0
+    predsample = 0
+    step = 0
+    diffq = 0
+
+    step = STEP_SIZE_TABLE[index]
+
+    # Step 1: inverse code into diff
+    diffq = step >> 3
+    if code & 4:
+        diffq += step
+    if code & 2:
+        diffq += step >> 1
+    if code & 1:
+        diffq += step >> 2
+
+    # Step 2: add diff to predicted sample
+    if code & 8:    # sign
+        predsample -= diffq
+    else:
+        predsample += diffq
+
+    # Step 3: check overflow
+    if predsample > 32767:
+        predsample = 32767
+    elif predsample < -32768:
+        predsample = -32768
+    
+    # Step 4: find new quantizer step size
+    index += INDEX_TABLE[code]
+    # check overflow
+    if index < 0:
+        index = 0
+    elif index > 88:
+        index = 88
+    
+    # Step 5: save predsample and index for next iter
+    return predsample
+
+def adpcm_frame_decode(data):
+    pcmBuffer = []
+    bufferStep = False
+    p_code = data[0]
+    code = 0
+    i = 0
+    ptr = 0
+    AUDIO_FRAME_SIZE = len(data)
+
+    while i < AUDIO_FRAME_SIZE:
+        if bufferStep:
+            code = p_code >> 4
+            p_code = data[ptr+1]
+            bufferStep = False
+            ptr += 1
+        else:
+            code = p_code & 0xF
+            bufferStep = True
+        i += 1
+        pcm = adpcm_decode2(code)
+        pcmBuffer.append(pcm)
+
+    return pcmBuffer
