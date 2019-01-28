@@ -5,6 +5,7 @@ import wave
 import audioop
 from struct import Struct
 import struct
+from dataclasses import dataclass
 
 CHUNK = 256
 FORMAT = pyaudio.paInt16
@@ -289,7 +290,14 @@ class RecordingDelegate5(DefaultDelegate):
 
         self.wavfile.close()
 
+@dataclass
+class ADPCM_State:
+    valpred: int
+    index: int
+
 # use modified adpcm_decode func
+adpcm_state = ADPCM_State(0, 0)
+
 class RecordingDelegate6(DefaultDelegate):
     def __init__(self, handles, audio_filename='RecordingDelegate6.wav'):
         DefaultDelegate.__init__(self)
@@ -298,21 +306,15 @@ class RecordingDelegate6(DefaultDelegate):
         self.wavfile = wave.open(audio_filename, 'wb')
         self.wavfile.setnchannels(CHANNELS)
         self.wavfile.setsampwidth(self.p.get_sample_size(FORMAT))
-        # maybe framerate should be:
-        # 16000 samples/second
-        # or
-        # 40 samples/frame * 60 frames/second = 2400 samples/second
-        # self.wavfile.setframerate(2400)
         self.wavfile.setframerate(RATE)
-        # this gets us close. Todo: try offsetting the bytes with -128
-        # self.wavfile.setframerate(int(RATE/4))
+        # self.wavfile.setframerate(8000~)
         self.numframes = 0
         self.frames = []
         print("* recording")
         self.state = None
-
+        
     def handleNotification(self, cHandle, data):
-        #pcm = adpcm_decode(data)
+        # pcm = adpcm_decode(data)
         pcm = adpcm_frame_decode(data)
         self.frames.append(pcm)
         self.numframes += 1
@@ -387,7 +389,7 @@ def adpcm_decode(adpcm):
     :param adpcm: bytes array
     :return: pcm
     """
-    s = Struct('< hb17s')
+    s = Struct('< hb128s')
     (valuePredicted, index, data) = s.unpack(adpcm)
 
     # Allocate output buffer
@@ -429,6 +431,7 @@ def adpcm_decode(adpcm):
 
         # /* Step 2 - Find new index value (for later) */
         index += INDEX_TABLE[delta]
+        print(delta)
         if index < 0:
             index = 0
         if index > 88:
@@ -470,9 +473,9 @@ def adpcm_decode(adpcm):
     return pcm
 
 # In this func, the input size of "code" should be 1 byte
-def adpcm_decode2(code):
-    index = 0
-    predsample = 0
+def adpcm_decode2(code, previndex, prevsample):
+    index = previndex
+    predsample = prevsample
     step = 0
     diffq = 0
 
@@ -508,28 +511,74 @@ def adpcm_decode2(code):
         index = 88
     
     # Step 5: save predsample and index for next iter
+    previndex = index
+    prevsample = predsample
     return predsample
 
 def adpcm_frame_decode(data):
-    pcmBuffer = []
-    bufferStep = False
-    p_code = data[0]
-    code = 0
-    i = 0
-    ptr = 0
-    AUDIO_FRAME_SIZE = len(data)
+    global adpcm_state
+    sign = 0        # current adpcm sign bit
+    delta = 0       # current adpcm output value
+    step = 0        # 
+    valpred = 0     # 
+    vpdiff = 0      # current change to valpred
+    index = 0       # current step change index
+    inputBuffer = 0 # place to keep next 4-bit value
+    bufferStep = 0  # toggle between input/inputBuffer
+    pcm = b''       # output
+    _in = 0
+    
+    valpred = adpcm_state.valpred
+    index = adpcm_state.index
 
-    while i < AUDIO_FRAME_SIZE:
+    step = STEP_SIZE_TABLE[index]
+
+    while _in < len(data):
+        # Step 1: get delta value
         if bufferStep:
-            code = p_code >> 4
-            p_code = data[ptr+1]
-            bufferStep = False
-            ptr += 1
+            delta = inputBuffer & 0xf
+            _in += 1
         else:
-            code = p_code & 0xF
-            bufferStep = True
-        i += 1
-        pcm = adpcm_decode2(code)
-        pcmBuffer.append(pcm)
+            inputBuffer = data[_in]
+            delta = (inputBuffer >> 4) & 0xf
+        bufferStep = not bufferStep
 
-    return pcmBuffer
+        # Step 2: find new index
+        index += INDEX_TABLE[delta]
+        if index < 0:
+            index = 0
+        if index > 88:
+            index = 88
+
+        # /* Step 3 - Separate sign and magnitude */
+        sign = delta & 8
+        delta = delta & 7
+
+        # /* Step 4 - Compute difference and new predicted value */
+        vpdiff = step >> 3
+        if delta & 4:
+            vpdiff += step
+        if delta & 2:
+            vpdiff += step >> 1
+        if delta & 1:
+            vpdiff += step >> 2
+
+        if sign > 0:
+            valpred -= vpdiff
+        else:
+            valpred += vpdiff
+
+        # /* Step 5 - clamp output value */
+        if valpred > 32767:
+            valpred = 32767
+        elif valpred < -32768:
+            valpred = -32768
+
+        step = STEP_SIZE_TABLE[index]
+
+        pcm += struct.pack('< h', valpred)
+        
+        # adpcm_state.valpred = valpred
+        # adpcm_state.index = index
+    
+    return pcm
